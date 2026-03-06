@@ -28,9 +28,7 @@ pipeline {
 
         stage('Check Ollama Server') {
     steps {
-        sh '''
-        curl http://localhost:11434
-        '''
+        sh 'curl http://host.docker.internal:11434'
     }
 }
 
