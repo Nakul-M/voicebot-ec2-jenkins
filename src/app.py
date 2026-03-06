@@ -33,7 +33,7 @@ interrupt_event = threading.Event()
 # -----------------------------
 # Load Background Audio
 # -----------------------------
-def load_background_audio(path="background.wav"):
+def load_background_audio(path="../background.wav"):
     try:
         with wave.open(path, "rb") as wf:
             sample_rate = wf.getframerate()
