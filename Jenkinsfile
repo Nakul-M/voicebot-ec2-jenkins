@@ -40,34 +40,31 @@ pipeline {
         }
 
         stage('Start Voicebot') {
-            steps {
-                sh '''
-                set -e
+    steps {
+        sh '''
+        set -e
 
-                echo "Activating virtual environment..."
-                source venv/bin/activate
+        echo "Checking if voicebot already running..."
+        ps aux | grep "src/app.py" || true
 
-                echo "Checking if voicebot already running..."
-                ps aux | grep "src/app.py" || true
+        echo "Starting voicebot..."
 
-                echo "Starting voicebot..."
+        nohup venv/bin/python src/app.py > app.log 2>&1 &
 
-                nohup python src/app.py > app.log 2>&1 &
+        echo "Waiting for server..."
+        sleep 5
 
-                echo "Waiting for server to start..."
-                sleep 5
+        echo "Running python processes:"
+        ps aux | grep python || true
 
-                echo "Checking python processes..."
-                ps aux | grep python || true
+        echo "Checking port 8080..."
+        ss -tulnp | grep 8080 || true
 
-                echo "Checking port 8080..."
-                ss -tulnp | grep 8080 || true
-
-                echo "Showing logs..."
-                tail -n 20 app.log || true
-                '''
-            }
-        }
+        echo "Last logs:"
+        tail -n 20 app.log || true
+        '''
+    }
+}
     }
 
     post {
