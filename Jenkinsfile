@@ -26,20 +26,13 @@ pipeline {
             }
         }
 
-        stage('Verify Ollama Installation') {
-            steps {
-                echo "Checking Ollama installation..."
-                sh '''
-                if ! command -v ollama &> /dev/null
-                then
-                    echo "Ollama not installed. Installing..."
-                    curl -fsSL https://ollama.com/install.sh | sh
-                else
-                    echo "Ollama already installed."
-                fi
-                '''
-            }
-        }
+        stage('Check Ollama Server') {
+    steps {
+        sh '''
+        curl http://localhost:11434
+        '''
+    }
+}
 
         stage('Start Ollama Server') {
             steps {
