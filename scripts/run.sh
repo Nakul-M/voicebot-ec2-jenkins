@@ -5,23 +5,22 @@ echo "Starting Voicebot Deployment..."
 # Move to project directory
 cd $(dirname "$0")/..
 
-# Activate virtual environment
-source venv/bin/activate
+echo "Activating virtual environment..."
 
-echo "Starting Ollama server..."
+. venv/bin/activate
 
-# Start Ollama if not already running
-if ! pgrep -x "ollama" > /dev/null
+echo "Checking if voicebot already running..."
+
+if lsof -i :8080 > /dev/null
 then
-    nohup ollama serve > ollama.log 2>&1 &
-    sleep 5
+    echo "Voicebot already running on port 8080"
+    exit 0
 fi
 
-echo "Pulling model if not present... "
-ollama pull gemma3:1b
-
-echo "Starting Voicebot... kr mazaa"
+echo "Starting Voicebot..."
 
 nohup python src/app.py > app.log 2>&1 &
+
+sleep 3
 
 echo "Voicebot started successfully on port 8080"
