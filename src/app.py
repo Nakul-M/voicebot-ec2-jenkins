@@ -11,7 +11,7 @@ from ollama import Client
 # -----------------------------
 # Ollama Client
 # -----------------------------
-client = Client(host="http://host.docker.internal:11434")
+client = Client(host="http://172.26.13.25:11434")
 
 # -----------------------------
 # Load Models

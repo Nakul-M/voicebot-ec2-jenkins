@@ -28,7 +28,10 @@ pipeline {
 
         stage('Check Ollama Server') {
     steps {
-        sh 'curl http://host.docker.internal:11434'
+        sh '''
+        echo "Checking Ollama server..."
+        curl http://172.26.13.25:11434
+        '''
     }
 }
 
