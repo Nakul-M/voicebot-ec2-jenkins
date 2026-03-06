@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    environment {
-        OLLAMA_HOST = "http://127.0.0.1:11434"
-    }
-
     stages {
 
         stage('Clone Repository') {
@@ -27,34 +23,10 @@ pipeline {
         }
 
         stage('Check Ollama Server') {
-    steps {
-        sh '''
-        echo "Checking Ollama server..."
-        curl http://172.26.13.25:11434
-        '''
-    }
-}
-
-        stage('Start Ollama Server') {
             steps {
-                echo "Starting Ollama server..."
                 sh '''
-                if ! pgrep -x "ollama" > /dev/null
-                then
-                    nohup ollama serve > ollama.log 2>&1 &
-                    sleep 5
-                else
-                    echo "Ollama already running"
-                fi
-                '''
-            }
-        }
-
-        stage('Pull AI Model') {
-            steps {
-                echo "Pulling Gemma model..."
-                sh '''
-                ollama pull gemma3:1b
+                echo "Checking Ollama server..."
+                curl http://172.26.13.25:11434
                 '''
             }
         }
@@ -71,7 +43,6 @@ pipeline {
     }
 
     post {
-
         success {
             echo "Voicebot deployed successfully!"
         }
