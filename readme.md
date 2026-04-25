@@ -1,6 +1,6 @@
 Phase-1 Agentic Workflow
 
-Real-time, low-latency voice AI assistant using Ollama (Gemma) + FastRTC.
+Real-time, low-latency voice AI assistant using Openai + FastRTC.
 
 
 
