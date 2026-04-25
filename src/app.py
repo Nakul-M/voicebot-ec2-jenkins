@@ -1,224 +1,225 @@
 import sys
-import argparse
-import wave
-import numpy as np
+import os
+import json
 import threading
+import numpy as np
+from pathlib import Path
 
-from fastrtc import ReplyOnPause, Stream, get_stt_model, get_tts_model
+from dotenv import load_dotenv
+from openai import OpenAI
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from fastrtc import Stream, ReplyOnPause, get_stt_model, get_tts_model
 from loguru import logger
-from ollama import Client
 
-# -----------------------------
-# Ollama Client
-# -----------------------------
-client = Client(host="http://172.26.13.25:11434")
+load_dotenv()
 
-# -----------------------------
-# Load Models
-# -----------------------------
+# ─────────────────────────────────────────────
+# Client & Models
+# ─────────────────────────────────────────────
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+logger.remove()
+logger.add(sys.stderr, level="INFO", format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | {message}")
+
+logger.info("Loading STT model…")
 stt_model = get_stt_model()
+
+logger.info("Loading TTS model…")
 tts_model = get_tts_model()
 
-# -----------------------------
-# Logger Setup
-# -----------------------------
-logger.remove()
-logger.add(sys.stderr, level="INFO")
+logger.info("Models ready.")
 
-# -----------------------------
-# Global Interrupt Event
-# -----------------------------
-interrupt_event = threading.Event()
-
-# -----------------------------
-# Load Background Audio
-# -----------------------------
-def load_background_audio(path="../background.wav"):
-    try:
-        with wave.open(path, "rb") as wf:
-            sample_rate = wf.getframerate()
-            frames = wf.readframes(wf.getnframes())
-            audio_array = np.frombuffer(frames, dtype=np.int16)
-
-            logger.info(f"Background loaded: {sample_rate} Hz")
-            return sample_rate, audio_array
-
-    except Exception as e:
-        logger.error(f"Failed to load background audio: {e}")
-        return None, None
+# ─────────────────────────────────────────────
+# Constants
+# ─────────────────────────────────────────────
+ENERGY_THRESHOLD = 400
+SYSTEM_PROMPT = (
+    "You are a professional, calm, and eloquent AI voice assistant. "
+    "Respond clearly, concisely, and naturally. "
+    "Keep answers brief (1–3 sentences for conversational queries). "
+    "Do not use emojis, markdown, or special characters."
+)
 
 
-bg_sample_rate, bg_audio_array = load_background_audio()
+# ─────────────────────────────────────────────
+# Per-Connection Handler
+# ─────────────────────────────────────────────
+class PerConnectionHandler(ReplyOnPause):
+    """
+    Subclass of ReplyOnPause that creates a fresh, fully-isolated handler
+    for each WebRTC connection via copy().
 
+    The echo closure captures `self`, so each connection has its own:
+      - interrupt_event (threading.Event)
+      - send_message_sync calls to the data channel
+    """
 
-def play_background_loop(chunk_size=2048):
-    if bg_audio_array is None:
-        return
+    def __init__(self):
+        interrupt_event = threading.Event()
+        handler_ref = self   # forward reference captured by closures below
 
-    while True:
-        for i in range(0, len(bg_audio_array), chunk_size):
-            chunk = bg_audio_array[i:i + chunk_size]
-            yield (bg_sample_rate, chunk)
+        # ── Startup greeting ──────────────────────────────────────
+        def startup():
+            text = "Hello, how can I help you today?"
+            logger.info("[startup] Greeting user…")
+            for chunk in tts_model.stream_tts_sync(text):
+                yield chunk
 
-# -----------------------------
-# Warmup Ollama
-# -----------------------------
-def warmup():
-    try:
-        logger.info("Warming up Ollama model silently...")
-        client.chat(
-            model="gemma3:1b",
-            messages=[{"role": "system", "content": "Warmup"}],
-            options={"num_predict": 1, "temperature": 0},
-        )
-        logger.info("Warmup complete.")
-    except Exception as e:
-        logger.error(f"Warmup failed: {e}")
-
-# -----------------------------
-# Startup Voice Message
-# -----------------------------
-def startup():
-    text = "Hello Sundeep, how can I help you?"
-    for chunk in tts_model.stream_tts_sync(text):
-        yield chunk
-
-# -----------------------------
-# Core Voice Logic
-# -----------------------------
-def echo(audio):
-    try:
-        if audio is None:
-            return
-
-        # ---------------------------------------------
-        # Normalize audio input
-        # ---------------------------------------------
-        if isinstance(audio, tuple) and len(audio) == 2:
-            sample_rate, audio_array = audio
-        else:
-            sample_rate = 16000
-            audio_array = audio
-
-        if audio_array is None or len(audio_array) == 0:
-            return
-
-        audio_np = np.asarray(audio_array, dtype=np.int16)
-
-        # ---------------------------------------------
-        # RMS Energy Detection
-        # ---------------------------------------------
-        rms = np.sqrt(np.mean(audio_np.astype(np.float32) ** 2))
-        logger.info(f"Detected RMS energy: {rms}")
-
-        ENERGY_THRESHOLD = 400
-
-        # ---------------------------------------------
-        # If real speech → STOP TTS IMMEDIATELY
-        # ---------------------------------------------
-        if rms >= ENERGY_THRESHOLD:
-            interrupt_event.set()   # STOP CURRENT TTS NOW
-        else:
-            logger.info("Low-energy noise ignored.")
-            return
-
-        # ---------------------------------------------
-        # Process STT
-        # ---------------------------------------------
-        transcript = stt_model.stt((sample_rate, audio_np))
-
-        if not transcript or len(transcript.strip()) < 2:
-            logger.info("Empty or short transcript.")
-            return
-
-        logger.info(f"User: {transcript}")
-
-        interrupt_event.clear()
-
-        # ---------------------------------------------
-        # LLM Streaming
-        # ---------------------------------------------
-        stream = client.chat(
-            model="gemma3:1b",
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a professional AI assistant in a voice call. "
-                        "Respond clearly and naturally. "
-                        "Do not use emojis or special characters."
-                    ),
-                },
-                {"role": "user", "content": transcript},
-            ],
-            stream=True,
-            options={"num_predict": 40, "temperature": 0.6},
-        )
-
-        buffer = ""
-        first_token_received = False
-
-        for chunk in stream:
-
-            if "message" in chunk and "content" in chunk["message"]:
-                token = chunk["message"]["content"]
-
-                if not first_token_received:
-                    first_token_received = True
-                    logger.info("AI started speaking.")
-
-                buffer += token
-
-                if any(p in buffer for p in [".", "?", "!"]):
-                    text_to_speak = buffer.strip()
-                    buffer = ""
-
-                    for audio_chunk in tts_model.stream_tts_sync(text_to_speak):
-
-                        if interrupt_event.is_set():
-                            logger.info("TTS interrupted instantly.")
-                            return
-
-                        yield audio_chunk
-
-        if buffer.strip():
-            for audio_chunk in tts_model.stream_tts_sync(buffer.strip()):
-
-                if interrupt_event.is_set():
-                    logger.info("Final TTS interrupted instantly.")
+        # ── Core voice handler ────────────────────────────────────
+        def echo(audio):
+            try:
+                if audio is None:
                     return
 
-                yield audio_chunk
+                sample_rate, audio_array = (
+                    audio if isinstance(audio, tuple) else (16000, audio)
+                )
 
-    except Exception as e:
-        logger.error(f"Error: {e}")
+                if audio_array is None or len(audio_array) == 0:
+                    return
 
-# -----------------------------
-# Create Stream
-# -----------------------------
-def create_stream():
-    return Stream(
-        handler=ReplyOnPause(echo, startup_fn=startup),
-        modality="audio",
-        mode="send-receive",
-        ui_args={"title": "Ollama Voice Assistant"},
-    )
+                audio_np = np.asarray(audio_array, dtype=np.int16)
+                rms = float(np.sqrt(np.mean(audio_np.astype(np.float32) ** 2)))
 
-# -----------------------------
-# Main
-# -----------------------------
+                # ── Interruption detection ─────────────────────────
+                if rms >= ENERGY_THRESHOLD:
+                    interrupt_event.set()
+                else:
+                    logger.debug(f"[echo] Low-energy frame ({rms:.0f}), skipping.")
+                    return
+
+                # ── Speech-to-Text ─────────────────────────────────
+                transcript = stt_model.stt((sample_rate, audio_np))
+
+                if not transcript or len(transcript.strip()) < 2:
+                    logger.debug("[echo] Empty transcript, skipping.")
+                    return
+
+                logger.info(f"[echo] User said: {transcript!r}")
+                interrupt_event.clear()
+
+                # Send transcript to the frontend via data channel
+                try:
+                    handler_ref.send_message_sync(
+                        json.dumps({"type": "transcript", "role": "user", "text": transcript})
+                    )
+                except Exception:
+                    pass  # channel may not be ready yet
+
+                # ── LLM streaming ──────────────────────────────────
+                llm_stream = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": transcript},
+                    ],
+                    stream=True,
+                    temperature=0.65,
+                    max_tokens=150,
+                )
+
+                buffer = ""
+                ai_response_acc = ""
+
+                for chunk in llm_stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
+                        buffer += token
+                        ai_response_acc += token
+
+                        # Speak sentence-by-sentence for low latency
+                        if any(p in buffer for p in [".", "?", "!", ","]):
+                            sentence = buffer.strip()
+                            buffer = ""
+                            for audio_chunk in tts_model.stream_tts_sync(sentence):
+                                if interrupt_event.is_set():
+                                    logger.info("[echo] TTS interrupted by user speech.")
+                                    return
+                                yield audio_chunk
+
+                
+                if buffer.strip():
+                    for audio_chunk in tts_model.stream_tts_sync(buffer.strip()):
+                        if interrupt_event.is_set():
+                            return
+                        yield audio_chunk
+
+                # Send AI response back to frontend
+                try:
+                    handler_ref.send_message_sync(
+                        json.dumps({"type": "transcript", "role": "assistant", "text": ai_response_acc.strip()})
+                    )
+                except Exception:
+                    pass
+
+            except Exception as exc:
+                logger.error(f"[echo] Unhandled error: {exc}")
+
+        # Initialise the parent ReplyOnPause with our closures
+        super().__init__(
+            fn=echo,
+            startup_fn=startup,
+            can_interrupt=True,
+            output_sample_rate=24000,
+            input_sample_rate=48000,
+        )
+
+    # Called by FastRTC for every new WebRTC connection
+    def copy(self) -> "PerConnectionHandler":
+        logger.info("[stream] New connection → spawning isolated handler.")
+        return PerConnectionHandler()
+
+
+# ─────────────────────────────────────────────
+# FastRTC Stream
+# ─────────────────────────────────────────────
+stream = Stream(
+    handler=PerConnectionHandler(),
+    modality="audio",
+    mode="send-receive",
+    concurrency_limit=20,   # max simultaneous WebRTC sessions
+    time_limit=600,         
+)
+
+# ─────────────────────────────────────────────
+# FastAPI Application
+# ─────────────────────────────────────────────
+app = FastAPI(
+    title="AI Voice Assistant",
+    description="Concurrent voice AI powered by FastRTC + OpenAI",
+    version="1.0.0",
+)
+
+# Serve the custom HTML frontend
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    html_path = Path(__file__).parent / "index.html"
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+# Health / readiness probe
+@app.get("/health")
+async def health():
+    return JSONResponse({"status": "ok", "concurrency_limit": 20})
+
+# Mount FastRTC endpoints:
+#   POST /webrtc/offer
+#   GET  /websocket/offer   (WS)
+#   POST /telephone/incoming
+#   WS   /telephone/handler
+stream.mount(app)
+
+# ─────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Voice Assistant")
-    parser.add_argument("--phone", action="store_true")
-    args = parser.parse_args()
+    import uvicorn
 
-    warmup()
-
-    stream = create_stream()
-
-    if args.phone:
-        logger.info("Launching phone mode...")
-        stream.fastphone()
-    else:
-        logger.info("Launching Web UI on port 8080...")
-        stream.ui.launch(server_name="0.0.0.0", server_port=8080)
+    logger.info("Starting Voice Assistant on http://0.0.0.0:8080")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8080,
+        log_level="warning",   # suppress uvicorn noise; loguru handles app logs
+    )
